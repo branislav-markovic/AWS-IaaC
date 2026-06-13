@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC with public and private subnet'
+
+Parameters:
+  VPCTagName:
+    Type: String
+    Description: "Tag for VPC"
+    Default: MyCustomVPC
+  InstanceTagName:
+    Type: String
+    Description: "Tag for EC2"
+    Default: "MyCustomEC2"
+  SubnetTagName:
+    Type: String
+    Description: "Tag for Subnet"
+    Default: "MyCustomSubnet"
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref VPCTagName
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+
+  GatewayToInternet:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PrivateSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      CidrBlock: 10.0.2.0/24
+      Tags:
+        - Key: Name
+          Value: !Ref SubnetTagName
+
+  PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Ref SubnetTagName
+
+  ElasticIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: GatewayToInternet
+    Properties:
+      Domain: VPC
+
+  NatGW:
+    Type: "AWS::EC2::NatGateway"
+    Properties: 
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt ElasticIP.AllocationId
+
+  PublicSubnetRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+  PublicSubnetRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateSubnetRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateSubnetRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: NatGW
+    Properties:
+      RouteTableId: !Ref PrivateSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGW
+
+  PrivateSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateSubnetRouteTable
+
+  PublicSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  PrivateInstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Security Group for EC2"
+      VpcId: !Ref VPC
+
+  SSMInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref SSMInstanceRole]
+  
+  EC2:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: t3.micro
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}'
+      SubnetId: !Ref PrivateSubnet
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds:
+        - !Ref PrivateInstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceTagName
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  PublicSubnetId:
+    Value: !Ref PublicSubnet
+  PrivateSubnetId:
+    Value: !Ref PrivateSubnet
+  NatGatewayId:
+    Value: !Ref NatGW
+  InstanceId:
+    Value: !Ref EC2
+  SecurityGroupId:
+    Value: !Ref PrivateInstanceSecurityGroup
+  PrivateRouteTableId:
+    Value: !Ref PrivateSubnetRouteTable
+  PublicRouteTableId:
+    Value: !Ref PublicSubnetRouteTable

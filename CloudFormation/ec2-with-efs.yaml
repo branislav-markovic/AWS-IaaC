@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CF template to create EC2, EFS, Security Group and Mount Target'
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: dev
+    Description: Environment name prefix
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC id'
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Subnet for EFS mount target"
+Resources:
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for EC2
+      VPCId: !Ref VpcId
+      # SecurityGroupIngress:
+      #   - IpProtocol: tcp
+      #     FromPort: 22
+      #     ToPort: 22
+      #     CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvName}-ec2-sg"
+  EFSMountTargetSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for EFS Mount Target
+      VPCId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvName}-efs-sg"
+  EFSFilesystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${EnvName}-efs"
+  EFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFilesystem
+      SubnetId: !Ref SubnetId
+      SecurityGroups:
+        - !Ref EFSMountTargetSG
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: !Sub "${EnvName}-ec2-role"
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+      InstanceProfileName: !Sub "${EnvName}-ec2-profile"
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: EFSMountTarget
+    Properties:
+      SecurityGroupIds: [!Ref EC2SecurityGroup]
+      SubnetId: !Ref SubnetId
+      InstanceType: t3.micro
+      ImageId: 'ami-061ac2e015473fbe2'
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          yum install -y amazon-efs-utils
+
+          mkdir -p /mnt/efs
+
+          mount -t efs ${EFSFilesystem}:/ /mnt/efs
+
+          echo "${EFSFilesystem}:/ /mnt/efs efs defaults,_netdev 0 0" >> /etc/fstab
+Outputs:
+  EC2SecurityGroupId:
+    Description: 'EC2 Security Group'
+    Value: !Ref EC2SecurityGroup
+  EFSSGId:
+    Description: 'EFS SG'
+    Value: !Ref EFSMountTargetSG
+  EFSFileSystemId:
+    Description: 'EFS FS ID'
+    Value: !Ref EFSFilesystem
