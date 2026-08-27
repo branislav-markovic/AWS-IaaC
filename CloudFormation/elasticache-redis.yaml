@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ElastiCache Redis Practise Stack
+
+Parameters:
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+    SubnetA:
+        Type: AWS::EC2::Subnet::Id
+    SubnetB:
+        Type: AWS::EC2::Subnet::Id
+    ImageId:
+        Type: AWS::EC2::Image::Id
+Resources:
+    InstanceSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Security group for EC2
+            VpcId: !Ref VpcId
+    CacheSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            VpcId: !Ref VpcId
+            GroupDescription: Security group for Redis
+    CacheSecurityGroupIngress:
+        Type: AWS::EC2::SecurityGroupIngress
+        Properties:
+            GroupId: !Ref CacheSecurityGroup
+            IpProtocol: tcp
+            FromPort: 6379
+            ToPort: 6379
+            SourceSecurityGroupId: !Ref InstanceSecurityGroup
+    CacheSubnetGroup:
+        Type: AWS::ElastiCache::SubnetGroup
+        Properties:
+            Description: Subnet group for ElastiCache Redis
+            SubnetIds:
+                - Ref: SubnetA
+                - Ref: SubnetB
+    CacheCluster:
+        Type: AWS::ElastiCache::CacheCluster
+        Properties:
+            CacheNodeType: 'cache.t3.micro'
+            CacheSubnetGroupName: !Ref CacheSubnetGroup
+            Engine: redis
+            NumCacheNodes: 1
+            VpcSecurityGroupIds:
+                - !Ref CacheSecurityGroup
+    SSMInstanceRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: ec2.amazonaws.com
+                      Action: sts:AssumeRole
+            ManagedPolicyArns:
+                - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+    SSMInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Roles:
+                - !Ref SSMInstanceRole    
+    EC2Instance:
+        Type: AWS::EC2::Instance
+        Properties:
+            IamInstanceProfile: !Ref SSMInstanceProfile
+            ImageId: !Ref ImageId
+            InstanceType: 't3.micro'
+            SubnetId: !Ref SubnetA
+            SecurityGroupIds:
+                - !Ref InstanceSecurityGroup
+            UserData:
+                Fn::Base64:
+                    !Sub |
+                    #!/bin/bash -xe
+
+                    # Update and install redis-cli (Amazon Linux / AL2 style)
+                    yum update -y
+                    yum install -y redis
+
+                    # Redis endpoint from CloudFormation
+                    REDIS_ENDPOINT="${CacheCluster.RedisEndpoint.Address}"
+                    REDIS_PORT="6379"
+
+                    # Print endpoint info
+                    echo "Redis endpoint: ${!REDIS_ENDPOINT}"
+                    echo "Redis port: ${!REDIS_PORT}"
+
+Outputs:
+    InstanceId:
+        Value: !Ref EC2Instance
+        Description: EC2 Instance Id
+    RedisEndpointAddr:
+        Value: !GetAtt 'CacheCluster.RedisEndpoint.Address'
+        Description: Redis DNS
