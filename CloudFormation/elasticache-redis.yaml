@@ -9,7 +9,8 @@ Parameters:
     SubnetB:
         Type: AWS::EC2::Subnet::Id
     ImageId:
-        Type: AWS::EC2::Image::Id
+        Type: String
+        Default: ami-07b8fb6bd3e9627a6
 Resources:
     InstanceSecurityGroup:
         Type: AWS::EC2::SecurityGroup
@@ -76,18 +77,21 @@ Resources:
                     !Sub |
                     #!/bin/bash -xe
 
-                    # Update and install redis-cli (Amazon Linux / AL2 style)
                     yum update -y
-                    yum install -y redis
+                    
+                    # 1. Install redis6 (AL2023 package name)
+                    dnf install -y redis6
 
-                    # Redis endpoint from CloudFormation
+                    # 2. Create symlink so 'redis-cli' command works
+                    ln -s /usr/bin/redis6-cli /usr/bin/redis-cli
+
+                    # 3. Correct variable expansion syntax
                     REDIS_ENDPOINT="${CacheCluster.RedisEndpoint.Address}"
-                    REDIS_PORT="6379"
+                    REDIS_PORT="${CacheCluster.RedisEndpoint.Port}"
 
-                    # Print endpoint info
-                    echo "Redis endpoint: ${!REDIS_ENDPOINT}"
-                    echo "Redis port: ${!REDIS_PORT}"
-
+                    # 4. Use standard bash variable syntax (removed the '!')
+                    echo "Redis endpoint: $REDIS_ENDPOINT"
+                    echo "Redis port: $REDIS_PORT"
 Outputs:
     InstanceId:
         Value: !Ref EC2Instance
