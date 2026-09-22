@@ -111,6 +111,8 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: AppLeastPrivPolicy
           PolicyDocument:
@@ -127,7 +129,7 @@ Resources:
                   - !GetAtt ImageUploadBucket.Arn
                   - !Sub '${ImageUploadBucket.Arn}/*'
               # DynamoDB permissions
-              - Effect: allow
+              - Effect: Allow
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
@@ -165,7 +167,7 @@ Resources:
         SecurityGroupIds:
           - !Ref EC2SecurityGroup
         UserData:
-          Fn:Base64: !Sub |
+          Fn::Base64: !Sub |
             #!/bin/bash
             yum update -y
 
@@ -176,11 +178,11 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref EC2LaunchTemplate
         Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
-      MinSize: '2'
-      MaxSize: '2'
-      DesiredCapacity: '2'
+      MinSize: 2
+      MaxSize: 2
+      DesiredCapacity: 2
       VPCZoneIdentifier: !Ref SubnetIds
-      TargetGroupArns:
+      TargetGroupARNs:
         - !Ref ALBTargetGroup
       HealthCheckType: ELB
       HealthCheckGracePeriod: 300
