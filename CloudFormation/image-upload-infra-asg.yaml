@@ -56,7 +56,7 @@ Resources:
             Effect: Allow
             Principal: '*'
             Action: 's3:GetObject'
-            Resource: !Sub '${ImageUploadBucket}/*'
+            Resource: !Sub '${ImageUploadBucket.Arn}/*'
 
   AppDatabase:
     Type: AWS::DynamoDB::Table
