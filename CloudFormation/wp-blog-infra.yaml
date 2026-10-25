@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: High-Availability WordPress Stack with ALB, ASG (2 instances), EFS, RDS MySQL, S3 Deployment, Secrets Manager, and NAT Gateway.
+
+Parameters:
+  DBName:
+    Type: String
+    Default: wordpressdb
+    Description: Name of the WordPress database
+
+  DBUser:
+    Type: String
+    Description: Master database username (Required for security, no default)
+
+  S3BucketName:
+    Type: String
+    Default: my-wordpress-source-bucket-name
+    Description: Name of the S3 bucket containing your wordpress-code.zip
+
+  S3ZipKey:
+    Type: String
+    Default: wordpress-code.zip
+    Description: Path/name of the zip file inside your S3 bucket
+
+Resources:
+  # --- Secrets Manager for Secure DB Password (Auto-Generated) ---
+  DBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Auto-generated secure database master password for WordPress RDS
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBUser}"}'
+        GenerateStringKey: "password"
+        PasswordLength: 20
+        ExcludeCharacters: "\"@/\\' "
+
+  # --- VPC & Networking ---
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+
+  # --- Public Route Table ---
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssocPublic1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssocPublic2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- NAT Gateway & Elastic IP for Private Subnets ---
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: WordPressNatGW
+
+  # --- Private Route Table (Outbound via NAT Gateway) ---
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  SubnetRouteTableAssocPrivate1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  SubnetRouteTableAssocPrivate2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # --- Security Groups ---
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow public HTTP traffic
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB and internal NFS
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.0.0/16
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL access from EC2 instances
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+
+  # --- Database (RDS MySQL) ---
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for RDS
+      SubnetIds: [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]
+
+  MySQLDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: mysql
+      EngineVersion: "8.0"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBPasswordSecret}:SecretString:password:}}"
+      DBName: !Ref DBName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [ !Ref RDSSecurityGroup ]
+
+  # --- Storage (Amazon EFS) ---
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups: [ !Ref EC2SecurityGroup ]
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups: [ !Ref EC2SecurityGroup ]
+
+  # --- IAM Role for EC2 (S3, Secrets Manager & SSM Access) ---
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3AndSecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ "s3:GetObject" ]
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}/${S3ZipKey}"
+              - Effect: Allow
+                Action: [ "secretsmanager:GetSecretValue" ]
+                Resource: !Ref DBPasswordSecret
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref EC2InstanceRole ]
+
+  # --- Load Balancer ---
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets: [ !Ref PublicSubnet1, !Ref PublicSubnet2 ]
+      SecurityGroups: [ !Ref ALBSecurityGroup ]
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref MyVPC
+      TargetType: instance
+      HealthCheckPath: /index.php
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # --- Auto Scaling Group & Launch Template ---
+  WebServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0111419d42d14a400
+        InstanceType: t3.micro
+        SecurityGroupIds: [ !Ref EC2SecurityGroup ]
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            dnf update -y
+            dnf install -y httpd php php-mysqlnd php-gd wget unzip amazon-efs-utils jq python3
+
+            systemctl start httpd
+            systemctl enable httpd
+
+            # Mount EFS to /var/www/html
+            mkdir -p /var/www/html
+            echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html efs defaults,_netdev 0 0" >> /etc/fstab
+            mount -a
+
+            # --- ATOMIC EFS LOCK TO PREVENT ASG RACE CONDITION ---
+            if mkdir /var/www/html/.unzip_lock 2>/dev/null; then
+              if [ ! -f /var/www/html/index.php ]; then
+                echo "Instance won lock. Downloading and extracting WordPress..."
+                aws s3 cp s3://${S3BucketName}/${S3ZipKey} /tmp/wordpress.zip
+                unzip -q /tmp/wordpress.zip -d /tmp/wp-extracted/
+                cp -r /tmp/wp-extracted/* /var/www/html/
+                chown -R apache:apache /var/www/html
+              fi
+              rmdir /var/www/html/.unzip_lock
+            else
+              echo "Another instance is currently extracting WordPress. Waiting..."
+              while [ -d /var/www/html/.unzip_lock ]; do
+                sleep 2
+              done
+            fi
+
+            # Fetch DB credentials from Secrets Manager
+            SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id ${DBPasswordSecret} --region ${AWS::Region} --query SecretString --output text)
+            DB_PASS=$(echo "$SECRET_JSON" | jq -r .password)
+            DB_HOST="${MySQLDatabase.Endpoint.Address}"
+
+            # Write environment variables to a dedicated Apache config drop-in file
+            cat <<EOF > /etc/httpd/conf.d/wordpress-env.conf
+            SetEnv WORDPRESS_DB_NAME "${DBName}"
+            SetEnv WORDPRESS_DB_USER "${DBUser}"
+            SetEnv WORDPRESS_DB_PASSWORD "$DB_PASS"
+            SetEnv WORDPRESS_DB_HOST "$DB_HOST"
+            EOF
+
+            # --- CONFIGURE wp-config.php DYNAMICALLY FOR AWS RDS & LOCAL HYBRID ---
+            if [ -f /var/www/html/wp-config-sample.php ] && [ ! -f /var/www/html/wp-config.php ]; then
+              cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+              
+              # Python replaces the default hardcoded strings with standard PHP getenv() code block
+              python3 -c "
+              with open('/var/www/html/wp-config.php', 'r') as f:
+                  content = f.read()
+              
+              # Replace default placeholders with PHP getenv code blocks
+              content = content.replace(\"'database_name_here'\", \"getenv('WORDPRESS_DB_NAME') ?: 'wordpress'\")
+              content = content.replace(\"'username_here'\", \"getenv('WORDPRESS_DB_USER') ?: 'example username'\")
+              content = content.replace(\"'password_here'\", \"getenv('WORDPRESS_DB_PASSWORD') ?: 'example password'\")
+              content = content.replace(\"'localhost'\", \"getenv('WORDPRESS_DB_HOST') ?: 'mysql'\")
+
+              with open('/var/www/html/wp-config.php', 'w') as f:
+                  f.write(content)
+              "
+              chown apache:apache /var/www/html/wp-config.php
+            fi
+
+            # Final restart to load Apache environment configuration
+            systemctl restart httpd
+  WebServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebServerLaunchTemplate
+        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '2'
+      DesiredCapacity: '2'
+      TargetGroupARNs: [ !Ref ALBTargetGroup ]
+
+Outputs:
+  WebsiteURL:
+    Description: URL of the WordPress Blog
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
